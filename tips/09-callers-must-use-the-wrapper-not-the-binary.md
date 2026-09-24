@@ -1,38 +1,58 @@
-# 09 · 隧道搭好了还是间歇性报错？大概率是调用方绕开了 wrapper
+# 09 · 隧道搭好了还是偶发报错？大概率是某个脚本悄悄绕开了 Wrapper
 
-跟 tips/06、08 配套的踩坑记录:出口隧道和 wrapper 都装对了,`agy-tunnel status`/`agy-tunnel ip` 也确认通道是通的,但某个 skill 或脚本跑起来还是偶发 `User location is not supported`。查了半天,问题不在隧道，在调用方自己绕开了 wrapper。
+> **“隧道查了，是通的；公网 IP 查了，是美区 GCP 的；自己在终端手动敲命令测了一百次，次次成功。怎么放到某个自动化 Skill 里跑，就又抽风报 `User location is not supported`？！”**
 
-## 症状
+如果你也遇到了这种“薛定谔的报错”，先别怀疑人生，**问题往往不在网络隧道本身，而是调用方在暗度陈仓，悄悄绕过了你辛辛苦苦配置的 Wrapper！**
 
-- 手动在终端跑 `agy -p "..."` 一切正常(因为交互 shell 里 PATH 排序对,解析到的是 wrapper)
-- 同一个 prompt 换成脚本/Claude Code 的 Bash 工具跑,时不时报地区错误
-- 报错不是每次都出现，跟 tips/06 描述的"共享 IP 判定飘忽"症状一模一样，容易被误判成"隧道也不是百分百稳"
+---
 
-## 根因
+## 案发现场：谁动了我的 PATH？
 
-装 wrapper 的方式是把它放在 `~/.local/overrides/agy`，靠 **PATH 顺序**排在真二进制 `~/.local/bin/agy` 前面。这个机制只在"按命令名 `agy` 走 PATH 解析"的调用方式下生效。
+在 [Tip 06](06-dedicated-exit-ip.md) 中，我们让代理生效的手段是：
+把 Wrapper 脚本放在 `~/.local/overrides/agy`，并利用 **PATH 环境变量的优先级**，让系统在解析命令 `agy` 时，先命中 Wrapper（注入专用代理），再由 Wrapper 去拉起真实的二进制文件。
 
-两类调用方式会跳过它，且不会报任何错——因为路径本身是存在的、可执行的，只是导流失效了：
+**但这个逻辑有一个致命死穴：它只在“全量依赖 PATH 解析”时才管用！**
 
-1. **写死了二进制的绝对路径**：不管是某个 skill 文档里的示例命令、还是 Python 脚本里 `shutil.which("agy") or "/Users/andy/.local/bin/agy"` 这种写法——`shutil.which` 在某些非交互/非登录场景下 PATH 不含 overrides 目录，直接落到硬编码的 fallback，从此稳定绕开 wrapper。
-2. **非交互 SSH / cron / launchd 等场景的 PATH 本来就不含 `~/.local/overrides`**（这个坑本身也是个已知陷阱，跟 mac-sync 那条"非交互 ssh PATH 不含 /opt/homebrew/bin"是同一类问题）。
+现实开发中，有两类场景会神不知鬼不觉地把它跳过去：
 
-第 1 类最隐蔽：代码逻辑看起来完全合理("先找 PATH 里的 agy，找不到再退回已知路径")，实际效果却是**优先级反了**——`shutil.which` 在 PATH 不含 overrides 时找到的可能压根不是 wrapper，最后兜底又落回裸二进制。
-
-## 修法
-
-调用方自己判断优先级，不要依赖 `shutil.which`/PATH 解析的默认顺序：**显式先探测 `~/.local/overrides/agy` 是否存在，存在就用它，不存在才退回其他方式**。
-
+### 1. 脚本里图省事，硬编码了绝对路径
+很多同学（或者自动生成的文档）为了防止环境报错，喜欢在 Python 或 Shell 脚本里写死路径：
 ```python
-from pathlib import Path
-import shutil
+# 致命陷阱：很多人自以为很严谨的写法
+AGY_BIN = shutil.which("agy") or "/Users/yourname/.local/bin/agy"
+```
+或者在 Shell 里写死：
+```bash
+/Users/yourname/.local/bin/agy -p "..."  # 直接死穴！
+```
+调用方直接越过了 `overrides`，直接去找真正的裸二进制。裸二进制身上**根本没有被注入任何 SOCKS5 代理环境变量**，于是请求一头撞向了本地默认网络，地区报错瞬间卷土重来！
 
+### 2. 非交互 Shell（Cron / Launchd / Subprocess）的 PATH 根本没加载
+这是另一个隐形大坑：在终端里敲命令是 Interactive Login Shell，你的 `~/.zshrc` 完整执行了，PATH 排序正确；  
+但如果是被外部 Agent、定时任务（Cron）、或者 Python 的 `subprocess.run(..., shell=True)` 调起，它们起的是 **Non-Interactive Shell**，很多系统的初始 PATH 压根不包含 `~/.local/overrides`！
+
+---
+
+## 治本之策：显式探测，把优先权抢回来
+
+不要寄希望于 `shutil.which` 或默认 PATH 行为。在任何需要调用 `agy` 的脚本或代码里，**显式把优先探测 `~/.local/overrides/agy` 写在第一位**！
+
+### Python 稳健写法
+```python
+import shutil
+from pathlib import Path
+
+# 显式把 override 目录排在第一优先级
 _override = Path.home() / ".local" / "overrides" / "agy"
-AGY_BIN = str(_override) if _override.exists() else (shutil.which("agy") or str(Path.home() / ".local" / "bin" / "agy"))
+_real = Path.home() / ".local" / "bin" / "agy"
+
+if _override.is_file() and os.access(_override, os.X_OK):
+    AGY_BIN = str(_override)
+else:
+    AGY_BIN = shutil.which("agy") or str(_real)
 ```
 
-Shell 脚本同理：
-
+### Shell 稳健写法
 ```bash
 if [ -x "$HOME/.local/overrides/agy" ]; then
   AGY_BIN="$HOME/.local/overrides/agy"
@@ -41,14 +61,14 @@ else
 fi
 ```
 
-## 排查清单
+---
 
-装了 tips/06 那套隧道之后，任何新写的调用 agy 的脚本/skill 文档，加进代码审查/验收清单里过一遍：
+## 踩坑后的自查清单
 
-- [ ] 有没有硬编码 `~/.local/bin/agy`（裸二进制）当首选或兜底优先于 override？
-- [ ] 有没有依赖 `shutil.which("agy")` / `command -v agy` 的默认返回值，却没显式测过 override 路径？
-- [ ] 这段调用会不会跑在非交互 shell（cron、launchd、Claude Code 的 Bash 工具、SSH 非交互命令）里？这些场景的 PATH 未必含 `~/.local/overrides`。
+凡是以后写到调起 `agy` 的工具、Skill、或者自动化脚本，自问这三句话：
+- [ ] 代码里有没有写死 `~/.local/bin/agy`（裸二进制）？
+- [ ] 是否存在 fallback 兜底直接落到了未代理的原生路径？
+- [ ] 这一段调用会不会运行在纯非交互式环境（比如 CI、定时任务、或第三方 Agent 的 Bash 工具）中？
 
-## 教训来源
+只要牢牢把住这道门，专用代理出口才能真正做到滴水不漏。
 
-2026-08-15，一个批量生图 skill（文档里直接写死了裸二进制路径当"推荐用法"，理由是"避免 zsh 函数在非交互 shell 里报错"——这个理由本身没错，但选错了替代路径，绕过了 wrapper 而不是绕过 zsh 函数）间歇性生图失败，排查后发现同一个 prompt 换成 wrapper 路径立刻稳定成功。顺手排查了另外两个用 `shutil.which("agy") or "~/.local/bin/agy"` 写法的 Python 脚本，属于同一类风险，一并改掉。

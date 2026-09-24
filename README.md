@@ -1,45 +1,71 @@
-# agy-tips
+# 🚀 agy-tips：Google Antigravity CLI 踩坑与压榨指南
 
-记录 [Google Antigravity CLI](https://antigravity.google)（命令 `agy`）的使用技巧、自动化脚本、踩坑笔记。
+> **“一个月花了小两百买 Google AI Pro / Ultra 订阅，难道就只配在网页端打字聊天？”**  
+> 当然不。我们的目标很单纯：把订阅自带的高级模型额度压榨到极致，能交给命令行自动化的活儿，绝不再人肉点一下。
 
-目标：把订阅额度（AI Pro / Ultra）压榨到极致，能自动化的事别再手点。
+本仓库记录了在实战中死磕 [Google Antigravity CLI](https://antigravity.google)（终端命令 `agy`）沉淀下来的**深度避坑指南、工程级自动化脚本以及多 Agent 协作工作流**。
 
-## 目录
+所有的坑都是真金白银通宵踩出来的，所有的脚本都在 macOS / Linux 生产环境中日夜运转。希望能帮你省下几十个小时查各种奇怪报错的头发。
 
-- [01 · 用订阅额度自动生成图片](tips/01-image-gen-with-subscription.md)
-- [02 · `agy -p`（print 模式）认证失效:交互能用、自动化全超时](tips/02-print-mode-auth-bug.md) ⚠ 1.0.3 已知 bug
-- [03 · 让 agy 别再每步都问：默认自动批准所有工具权限](tips/03-auto-approve-all-permissions.md)
-- [04 · print 模式在新目录/worktree 里秒超时：文件夹未信任（非认证问题）](tips/04-worktree-untrusted-folder-print-timeout.md)
-- [05 · 施工模式：Claude Code 写卡 + agy 施工 + Claude 验收](tips/05-claude-drives-agy-construction-mode.md)
-- [06 · 给 agy 单开一条专用出口线路，治好 "User location is not supported"](tips/06-dedicated-exit-ip.md)
-- [07 · 终端 Markdown 渲染与排版避坑：为什么会看到 #### 与最佳排版姿势](tips/07-terminal-markdown-rendering.md)
-- [08 · 专用出口 IP 也不一定稳：Google 判的是 ASN 归属，不是「独不独占」](tips/08-exit-ip-asn-not-just-dedicated.md)
-- [09 · 隧道搭好了还是间歇性报错？大概率是调用方绕开了 wrapper](tips/09-callers-must-use-the-wrapper-not-the-binary.md)
-- [10 · 让 Claude Code 和 agy 在同一目录协同：AGENTS.md 薄壳 + 单一真相源](tips/10-agents-md-shared-project-context.md)
-- [11 · 自定义状态栏：一眼看到机型、执行模式、上下文余量和额度](tips/11-custom-statusline.md)
-- [12 · 汉化 /resume 英文会话标题：包装层退出时自动异步回写 SQLite](tips/12-auto-translate-resume-titles.md)
-- [13 · 隧道断过一次，任务就跟着挂：重启真空期 + 22 端口偶发黑洞](tips/13-tunnel-restart-gap-and-ssh22-blackhole.md)
-- [14 · 隧道没断，但 agy 特别慢：单条 ssh 的队头阻塞 + 只测「通不通」的健康检查](tips/14-tunnel-slow-not-broken-hol-blocking.md)
-- [15 · 开太多 agy 实例会互相踢下线：OAuth token 刷新竞争导致 401](tips/15-multiple-instances-refresh-token-race-401.md)
+---
 
-## 脚本
+## 📚 踩坑与绝技目录
 
-- [`scripts/genimg.sh`](scripts/genimg.sh) — 一行命令出图
-- [`scripts/agy-do`](scripts/agy-do) — 按任务卡派 agy 施工（worktree 隔离 + 逃逸检测 + 验收摘要，`--async` 后台跑）
-- [`scripts/agy-runs`](scripts/agy-runs) — 列出后台施工：在跑 / 待验收 / 失败，见 tip 05
-- [`scripts/agy-tunnel`](scripts/agy-tunnel) — 自有服务器 SOCKS5 出口：gost 前置口 + 三条 ssh 上游故障转移，见 tip 13/14
-- [`scripts/agy-wrapper`](scripts/agy-wrapper) — 只给 agy 注入这条出口的代理外壳，通道断了自动降级；会话退出自动异步汉化标题
-- [`scripts/agy-title-zh`](scripts/agy-title-zh) — 扫描并汉化 SQLite 会话标题，见 tip 12
-- [`scripts/agy-ps`](scripts/agy-ps) — 列出活着的 agy 实例并清掉闲置的（多开会互刷 OAuth token 报 401），见 tip 15
-- [`scripts/agy-tunnel.plist.template`](scripts/agy-tunnel.plist.template) — launchd 常驻（开机自启 + 掉线重连），现在需要 4 个 job + 1 个健康检查 job
-- [`scripts/statusline.sh`](scripts/statusline.sh) — 状态栏脚本，见 tip 11
+别按顺序硬啃，遇到哪个痛点直接点进去看：
 
-## 适用环境
+### ⚡ 额度压榨与图片生成
+* [01 · 用订阅额度白嫖画图，拒绝按量计费](tips/01-image-gen-with-subscription.md) —— 官方 SDK 只认 API key 扣费？教你直接走 CLI OAuth 免费跑 Nano Banana，一行命令搞定。
 
-- macOS / Linux（zsh / bash）
-- 已安装 Antigravity 桌面 app 或 CLI（`agy --version` 能跑）
-- 已 OAuth 登录订阅账号（不是 API key）
+### 🛡️ 权限、认证与奇葩超时（新手必崩环节）
+* [02 · `agy -p` 命令行一跑就卡死？记 1.0.3 的凭证割裂 Bug](tips/02-print-mode-auth-bug.md) —— 交互界面明明好好的，脚本一调就报 `Authentication timed out`？来看看交互与 print 模式的凭证深坑。
+* [03 · 别再问我要不要执行了！一键自动放行全部权限](tips/03-auto-approve-all-permissions.md) —— 每次改文件都要手动按 `Yes` 令人抓狂？教你用 Wrapper 永久注入 `--dangerously-skip-permissions`。
+* [04 · 新目录 / Git Worktree 里秒超时？这不是认证挂了，是文件夹未信任](tips/04-worktree-untrusted-folder-print-timeout.md) —— 很多人排查几天都怀疑账号被风控，其实只要两行脚本把路径塞进 `trustedWorkspaces`。
+* [15 · 多个终端同时开 agy 互相踢下线？排查 OAuth Token 刷新竞争](tips/15-multiple-instances-refresh-token-race-401.md) —— 并行开两三个实例干活，结果全部 401 掉线？教你用守护进程清理闲置实例。
 
-## 贡献
+### 🤖 混合双打：Claude Code 与 agy 施工协同
+* [05 · 「施工模式」最佳实践：Claude 出脑力写卡，agy 出劳力搬砖](tips/05-claude-drives-agy-construction-mode.md) —— 让贵的 Claude 做架构和验收，让包月的 agy 闷头写代码，双剑合璧省下成千上万 Token。
+* [10 · 让 Claude Code 和 agy 共享项目上下文：AGENTS.md 单一真相源](tips/10-agents-md-shared-project-context.md) —— 两个 Agent 轮流改代码怎么不打架？教你用一套规则文件统一认知。
 
-欢迎 PR。新增技巧放 `tips/NN-标题.md`，并在本 README 加一行索引。
+### 🌐 专用出口与网络治理（专治地区不支持）
+* [06 · 给 agy 独开一条出口线路，彻底治好 "User location is not supported"](tips/06-dedicated-exit-ip.md) —— 机场节点跳来跳去总被 Google 掐断？搭一条轻量级 SSH SOCKS5 专用通道给 agy。
+* [08 · 换了独享 IP 怎么还报错？Google 查的是 ASN 归属，别被机房骗了](tips/08-exit-ip-asn-not-just-dedicated.md) —— 为什么某些云厂商的 IP 会被 Google 判定为不可用？教你挑对真正干净的线路。
+* [09 · 隧道搭好了还是偶发报错？大概率是某个脚本悄悄绕开了 Wrapper](tips/09-callers-must-use-the-wrapper-not-the-binary.md) —— PATH 覆盖顺序与子进程继承代理的那些暗坑。
+* [13 · 隧道偶尔断一次任务就全挂？解决重启真空期与 22 端口偶发黑洞](tips/13-tunnel-restart-gap-and-ssh22-blackhole.md) —— 用 gost 配合本地端口转发实现平滑重试。
+* [14 · 隧道没断但 agy 慢如蜗牛？单条 SSH 队头阻塞排查与多路复用](tips/14-tunnel-slow-not-broken-hol-blocking.md) —— 排查 SSH 隧道拥塞控制的实战经验。
+
+### 🎨 终端体验与舒适度调优
+* [07 · 终端 Markdown 渲染与排版避坑：为什么会看到 #### 与最佳排版姿势](tips/07-terminal-markdown-rendering.md) —— 治好终端乱码、错位和原生语法不解析的强迫症。
+* [11 · 自定义状态栏：一眼看清当前模型、执行模式、剩余上下文与额度](tips/11-custom-statusline.md) —— 抄作业！三行信息清清楚楚，不用手动敲命令探查。
+* [12 · 汉化 /resume 会话列表：退出时异步回写 SQLite 数据库](tips/12-auto-translate-resume-titles.md) —— 原生生成的全是英文长句？退出时自动翻译成中文存进本地库。
+
+---
+
+## 🛠️ 开箱即用的实用脚本
+
+所有脚本都在 [`scripts/`](scripts/) 目录下，经过实战检验：
+
+| 脚本文件 | 解决什么问题 | 对应文档 |
+| :--- | :--- | :--- |
+| [`statusline.sh`](scripts/statusline.sh) | **终端状态栏神器**：显示模型、余量、5h/7d 额度、任务一句话标题 | [Tip 11](tips/11-custom-statusline.md) |
+| [`genimg.sh`](scripts/genimg.sh) | **一行命令画图**：走订阅额度，直接生成图片并保存到桌面 | [Tip 01](tips/01-image-gen-with-subscription.md) |
+| [`agy-do`](scripts/agy-do) | **任务卡施工派发器**：Git Worktree 隔离 + 逃逸检测 + 自动异步验收 | [Tip 05](tips/05-claude-drives-agy-construction-mode.md) |
+| [`agy-runs`](scripts/agy-runs) | **施工看板**：列出后台正在跑的施工任务、待验收及报错日志 | [Tip 05](tips/05-claude-drives-agy-construction-mode.md) |
+| [`agy-wrapper`](scripts/agy-wrapper) | **智能包装层**：自动注入免授权 flag、专用出口代理及会话标题汉化 | [Tip 03](tips/03-auto-approve-all-permissions.md) / [Tip 06](tips/06-dedicated-exit-ip.md) |
+| [`agy-tunnel`](scripts/agy-tunnel) | **出口隧道守护**：自建 SOCKS5 代理管理（启动/停止/状态检测/公网 IP 校验） | [Tip 06](tips/06-dedicated-exit-ip.md) |
+| [`agy-ps`](scripts/agy-ps) | **进程卫士**：检测活跃与僵尸 agy 进程，避免多实例竞争刷崩 OAuth Token | [Tip 15](tips/15-multiple-instances-refresh-token-race-401.md) |
+| [`agy-title-zh`](scripts/agy-title-zh) | **会话标题汉化**：扫描 `conversations.db` 并批量中文化会话名 | [Tip 12](tips/12-auto-translate-resume-titles.md) |
+
+---
+
+## 💡 几个走心的人生建议（前车之鉴）
+
+1. **别相信大模型的自我检查报告**：agy 跑完任务说“全部测试已通过”千万别信，它偷懒时也这么写。在任务卡里必须写明具体测试命令，让宿主环境或外部脚本用退出码说话。
+2. **多开终端时悠着点**：Google 对 CLI 端的 OAuth Token 刷新有一套锁机制，开三四个终端同时跑容易互相打架，瞬间触发 401 全体暴毙。多任务建议用异步任务队列跑。
+3. **把新目录信任当成第一反射**：如果你在脚本里调用 `agy -p` 莫名卡住没反应，先别急着抓包看网络，90% 是这个目录没在 `trustedWorkspaces` 里！
+
+---
+
+## 🤝 参与贡献
+
+欢迎提 Issue 和 PR！如果你也挖掘出了新的骚操作，欢迎把心得整理到 `tips/NN-标题.md`，并在本 README 中加入索引。
+

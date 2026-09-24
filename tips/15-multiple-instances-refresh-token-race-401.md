@@ -1,85 +1,106 @@
-# 15 · 开太多 agy 实例会互相踢下线：OAuth token 刷新竞争导致 401
+# 15 · 多个终端同时开 agy 互相踢下线？排查 OAuth Token 刷新竞争导致 401
 
-`Agent execution terminated due to error` 这句话没有任何信息量，看着像网络断了。我为它查了一整轮代理线路（成果见 tips/14），最后发现这次的直接原因跟网络无关：**同时开着的多个 agy 实例，在互相刷掉对方的登录状态。**
+> **“任务跑到 80% 突然暴毙，我抓包排查了一整宿网络，结果罪魁祸首竟是我自己在其他窗口开着的僵尸终端！”**
 
-## 症状
+看到终端里飘出这行毫无营养的报错时，绝大多数人的第一反应都是：**又断网了，或者代理节点被 Google 风控了**：
 
-agy 任务中途终止，只有一句：
-
-```
+```text
 Agent execution terminated due to error.
 Error ID: 5346b817-...
 ```
 
-那个 Error ID 是**服务端的**，本地日志里一次都搜不到，别指望靠它定位。真原因要去翻 `~/.gemini/antigravity-cli/log/cli-*.log`（agy 默认就在写，不用额外开 `--log-file`）：
+> [!WARNING]
+> 千万别傻乎乎拿那个 `Error ID` 去搜！那个 ID 是 **Google 服务端生成的链路追踪 ID**，在本地日志里搜一万遍也是查无此人。
 
-```
+真正的翻车真相，必须去翻本地原始日志：`~/.gemini/antigravity-cli/log/cli-*.log`（`agy` 默认就会把调试日志落盘，不用额外开参数）：
+
+```text
 E0828 16:07:00 errorreport.go:223] agent executor error: calling model:
   UNAUTHENTICATED (code 401): Request had invalid authentication credentials.
   Expected OAuth 2 access token, login cookie or other valid authentication credential.
 ```
 
-401，不是超时，不是 connection refused。线路是通的，是**凭据**在请求发出的那一刻已经失效了。
+看清楚：**HTTP 401 Unauthorized**！  
+不是网络超时，不是 Connection Refused，底层网络隧道健康得不得了——而是在你的请求发出的那一微秒，**你的登录凭证刚刚被无情作废了**。
 
-## 根因：token 只有一份，刷新的却有很多个
+---
 
-登录态存在 `~/.gemini/antigravity-cli/antigravity-oauth-token`，**全局一份**。而每个跑着的 agy 实例都自带一个后台协程，按自己的节奏每小时刷一次这个 token。
+## 刨根问底：凭证只有一份，但刷新者有千千万
 
-日志里能直接看到两个不同实例各刷各的（前面那串数字是 goroutine id，不同实例不同）：
+Antigravity CLI 的登录凭证保存在本地磁盘：
 
+```text
+~/.gemini/antigravity-cli/antigravity-oauth-token
 ```
+
+注意：**全局就这么孤零零的一份！**
+
+但每一个启动起来的 `agy` 进程，内部都会自作聪明地起一个后台协程，每隔大约一小时偷偷去 Google 刷一次这个 Token。
+
+翻开当时的并发日志，你会看到两个不同的终端实例在背地里疯狂打架（前面的数字是内部协程 ID）：
+
+```text
 I0828 11:06:19  70  browser.go:259] token refreshed, new expiry=12:06:18
 I0828 12:06:18  70  browser.go:259] token refreshed, new expiry=13:06:17
-I0828 13:06:29  13  browser.go:259] token refreshed, new expiry=14:06:28
-I0828 14:06:21  70  browser.go:259] token refreshed, new expiry=15:06:20
+I0828 13:06:29  13  browser.go:259] token refreshed, new expiry=14:06:28  <-- 实例 B 刷了新 Token
+I0828 14:06:21  70  browser.go:259] token refreshed, new expiry=15:06:20  <-- 实例 A 用的老 Token 当场失效！
 ```
 
-OAuth 刷新会让上一个 access token 作废。于是 A 刷完，B 手里那个就是废的，B 下一次调模型就吃 401——而这时候 B 可能正跑到任务一半。
+Google 的 OAuth 刷新机制是极其严格的：**一旦拿到了新的 Access Token，旧的马上作废！**  
+于是悲剧发生了：
+* 终端 A 正在辛辛苦苦施工写代码；
+* 挂在后台 tmux 里早就被你遗忘的终端 B 到了刷新时间点，悄悄向 Google 换了新 Token；
+* 终端 A 下一秒发请求调用模型，手里的 Token 已经是废纸一张，当场吃 401 暴毙！
 
-出事时机器上有 **8 个 agy 实例活着，其中两个已经挂了 29 小时**，全是开完忘了关的。这个 401 在我几周的日志里只出现过 3 次，但这 3 次全部集中在实例最多的时候。
+当时去查后台进程，整个人都傻了：**机器上居然同时挂着 8 个活着的 `agy` 实例，其中两个已经在 tmux 的后台角落里默默挂了 29 个小时！**
 
-## 排查时踩的两个坑
+---
 
-**1. 别用 `grep -i antigravity` 数实例。** 进程名就叫 `agy`，这么 grep 会得到 0 个，然后你就会得出「没有实例在跑」的错误结论，接着放心去重启隧道。我就这么干了一次。正确姿势：
+## 排查过程中的两大经典天坑
 
-```sh
+### 1. 千万别用 `grep -i antigravity` 数进程
+CLI 的二进制文件名字就叫 `agy`，执行 `ps aux | grep -i antigravity` 得到的结果是 0，会直接给你一种“我当前就开了一个进程，绝对不是多开”的致命幻觉。
+
+**正确的抓鬼命令：**
+```bash
 ps -Ao pid,etime,%cpu,command | grep '[.]local/bin/agy '
 ```
 
-**2. Error ID 不在本地日志里。** 前面说过了，但值得再说一次——很容易在它上面浪费时间。
+### 2. 日志还在写 ≠ 有人类在用
+这是最容易误判的陷阱！很多人以为“日志还在刷新说明有人在用”。错！`agy` 后台刷 Token 和上报配额的心跳协程每分每秒都在写日志，哪怕你离开电脑一天，它依然在疯狂写日志。
 
-## 处理
+---
 
-写了个 `scripts/agy-ps`，列出所有活着的实例、标出没人用的，`-k` 清掉：
+## 终极武器：编写进程看门狗脚本
 
-```
+为了彻底杜绝被暗箭射翻，仓库里专门编写了运维脚本 [`scripts/agy-ps`](../scripts/agy-ps)：
+
+```bash
 $ agy-ps
-PID     存活       最后说话   工作目录        状态
-13115   01-05:38:24  08-27 13:36   ~/coding/dailymd   闲置 ← 可杀 · ok 落盘进度
-92683   27:53        08-28 16:44   ~/coding/dailymd   在用 · ok 收工
-26658   25:09        从未输入      ~/coding/dailymd   在用
-15381   07:49:19     08-28 09:18   ~/coding/mingzhi   闲置 ← 可杀 · 然后用 2 和 3 分别合成
-68742   06:34:39     08-28 16:08   ~/coding/dailymd   在用 · 继续
+PID     存活时间       最后交互时间   工作目录          状态
+13115   01-05:38:24   08-27 13:36   ~/coding/pay-svc   闲置 ← 可杀（回执已落盘）
+92683   27:53         08-28 16:44   ~/coding/pay-svc   在用 · 正常施工中
+26658   25:09         从未输入      ~/coding/pay-svc   在用
+15381   07:49:19      08-28 09:18   ~/coding/auth-api  闲置 ← 可杀（已闲置 6 小时）
 ```
 
-⚠ **「闲不闲」不能看进程存活时长，也不能看 CPU。** 我第一版就是这么写的（CPU≈0 且存活 > 2 小时），一跑就当场误判：一个开了 6.5 小时、45 分钟前还在对话的会话被标成僵尸，而一个刚开 25 分钟、还没来得及说第一句话的被算成在用。三个直觉都是错的：
+只要带上 `-k` 参数，就能一键把所有挂机无用的僵尸实例利索地清掉：
+```bash
+agy-ps -k
+```
 
-- 存活久 ≠ 没在用；
-- CPU≈0 ≠ 没在用——agy 等你打字的时候就是 0%；
-- **日志还在写 ≠ 有人在用**——后台刷 token 和配额的心跳一直在写日志，这个最有迷惑性。
+### 如何科学判断一个会话是否“闲置”？
+* **看 CPU？** 错！agy 等你打字的时候 CPU 就是 0%。
+* **看运行时长？** 错！很多大任务本来就要跑几个小时。
+* **唯一可靠指标**：通过 `lsof` 找到进程绑定的日志句柄，抓取最后一次记录 `HandleUserInput`（人类在终端敲下回车）的时间戳。超过阈值没有人类输入的，才判定为挂机僵尸。
 
-唯一靠得住的判据是**最后一次人类输入**：用 `lsof` 定位每个实例自己的 `cli-*.log`，取最后一条 `HandleUserInput` 的时间戳，从那里算多久没动静。顺带把最后那句话打出来，一眼就能认出是哪个会话——比 PID 有用得多。
+此外，我们在 [`scripts/agy-wrapper`](../scripts/agy-wrapper) 里加了一道防线：**每次启动新实例前，如果检测到并发实例数 ≥ 3，立即在终端弹出醒目的黄色警告**，把隐患扼杀在发生之前。
 
-（日志时间戳形如 `I0828 16:47:31`，只有月日时分秒、没有年份，换算时要自己补当前年份。）
+---
 
-另外在 `scripts/agy-wrapper` 里加了个启动告警：实例数 ≥ 3 就喊一嗓子，把这个坑挡在发生之前。
+## 💡 给所有开发者的走心复盘
 
-## 结论
+1. **`Agent execution terminated due to error` 只是句套话**：看到它千万别急着去怪网络或梯子，赶紧去翻 `cli-*.log` 里的真实堆栈。
+2. **多开终端必遭反噬**：在本地 CLI 环境下，不要把 `agy` 当成无状态的云函数疯狂并发。没有做好隔离凭证前，尽量保持单会话专注，或者用异步队列串行跑。
+3. **养成随手关会话的好习惯**：写完了敲 `/exit` 或 `Ctrl+D` 正常退出，不要老是直接把终端标签页一关了之。
 
-- **`Agent execution terminated due to error` 是个占位符，不是诊断。** 每次都去翻 `cli-*.log` 里的 `errorreport.go`，那里才有真话。
-- **401 和网络问题在这句话下面长得一模一样**，但方向完全相反：一个查代理，一个查有几个实例在跑。先看日志再动手，能省一整轮排查。
-- 共享单份凭据的 CLI，**多开就是竞争**。tmux 里开完就走、忘了关的会话，是这类问题最常见的来源。
-
-## 涉及脚本改动
-
-新增 `scripts/agy-ps`；`scripts/agy-wrapper` 增加并发实例启动告警。

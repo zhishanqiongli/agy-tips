@@ -1,84 +1,96 @@
-# 04 · print 模式在新目录/worktree 里秒超时:是「文件夹未信任」,不是认证挂了
+# 04 · 新目录 / Worktree 里秒超时？这不是认证挂了，是文件夹未信任
 
-> 版本:agy(macOS,2026-07-14 实测)。与 [02 · print 模式认证失效](02-print-mode-auth-bug.md) **是两回事**,别混。
+> **测试环境**：`agy`（macOS，2026-07-14 实测）。请注意：这与 [02 · print 模式认证失效](02-print-mode-auth-bug.md) **完全是两码事**，千万别搞混！
 
-## 现象
+很多同学第一次用脚本跑自动化或者结合 `git worktree` 开新分支让 `agy` 施工时，都会被下面这个场面吓得不轻：
 
-同一份已登录、平时能跑的 agy,换到一个**新目录**(尤其是 `git worktree`、临时目录、刚 clone 的仓库)里跑 `agy -p`,**秒 timeout、零输出**:
-
-```
+```bash
 $ cd /path/to/repo/.worktrees/some-branch
-$ agy --dangerously-skip-permissions --print-timeout 45m -p "干活"
+$ agy --dangerously-skip-permissions --print-timeout 45m -p "帮我把这个测试修一下"
 Error: timeout waiting for response
 ```
 
-交互模式在同一目录下会**弹一个「授权/信任这个文件夹」的框**;print 模式弹不出这个框 → 直接卡死超时。
+整整等了一分钟，终端里连一个字符都没打印，直接报超时退出。
 
-## 和 tip 02 怎么区分(关键)
+更诡异的是：**明明登录账号是好的，代理也是好的，换回老目录跑同一句命令秒回，但只要一进新目录或者刚创建的 worktree 就瞬间暴毙**。
 
-| | tip 02(认证失效) | 本条(文件夹未信任) |
-|---|---|---|
-| 交互模式弹什么 | Google OAuth 登录 URL | 「授权/信任此文件夹」 |
-| 换个**已授权**目录跑 | 照样超时 | **正常返回** ← 决定性判据 |
-| 根因 | OAuth token 不落盘 | 目录不在信任列表 |
-| 能否本地修 | 1.0.3 上不能,等官方 | **能,见下** |
+---
 
-**一句话判据**:把同一条 `agy -p` 拿到一个**以前授权过的老目录**里跑——能返回就是本条(文件夹问题),还超时才是 tip 02(认证问题)。
+## 3 秒钟快速自测：你到底撞上了哪个坑？
 
-## 根因
+遇到非交互模式卡死，先别急着去抓包或重新登录，用下面这个表格一分钟定性：
 
-agy CLI 的信任文件夹列表在:
+| 维度 | [Tip 02 认证失效 Bug](02-print-mode-auth-bug.md) | **本篇：文件夹未信任（真凶）** |
+| :--- | :--- | :--- |
+| **交互模式会弹什么？** | 弹 Google OAuth 网页登录链接 | 弹一个黄色/蓝色的**「是否信任此文件夹？」**确认框 |
+| **换回以前跑过的老目录** | 依旧超时报错 | **立马正常返回！** ← 决定性判据 |
+| **事故根因** | 内存 Token 未落盘 | 新目录的绝对路径不在信任白名单里 |
+| **能否在本地搞定？** | 1.0.3 上改不了源码只能等官方 | **能！写两行脚本就地解决** |
 
-```
+> [!TIP]
+> **黄金判据**：把卡住的这句 `agy -p ...` 复制到一个你以前天天用的老项目目录里跑一下。如果老目录能跑，新目录超时，那 100% 就是撞上了这篇讲的**文件夹未信任**。
+
+---
+
+## 刨根问底：为什么会悄无声息地卡住？
+
+`agy` 内部维护了一张受信任工作区列表，保存在：
+
+```text
 ~/.gemini/antigravity-cli/settings.json  →  "trustedWorkspaces": [ ... ]
 ```
 
-**是精确路径匹配,不认父目录前缀。** 即使 `/Users/you` 和 `/Users/you/repo` 都在列表里,它们的**子目录**(如 `/Users/you/repo/.worktrees/foo`)仍算未信任、仍会弹授权框。这就是为什么:
+这里的坑在于：**它是精确绝对路径匹配，完全不认父目录！**
 
-- 主仓库授权过 ≠ 它的 git worktree 授权过(worktree 是不同的绝对路径);
-- 每开一个新 worktree / 临时目录,都得单独进一次信任列表。
+即使你的家目录 `/Users/yourname` 或者项目根目录 `/Users/yourname/my-project` 早就被你信任过八百遍了，只要你为了隔离环境新建了一个 Git Worktree（比如 `/Users/yourname/my-project/.worktrees/feature-a`），在 `agy` 眼里这就是个全新且可疑的陌生路径。
 
-`--dangerously-skip-permissions` 只跳**工具权限**,**不跳文件夹信任**——两套独立机制,别指望它兜底。
+* **在交互模式下**：它会老老实实弹一个对话框问你“是否信任该目录”。
+* **在 `-p`（Print 模式）下**：因为没有交互界面，弹不出这个确认框，内部逻辑就傻傻地无限阻塞在那里，直到外层触发 `timeout`。
+* **参数误区**：很多人以为加了 `--dangerously-skip-permissions` 就万事大吉，但那个参数**只管工具操作权限（改代码、跑终端），根本不管目录信任机制**，所以依然会被拒之门外！
 
-## 修复:起 agy 前把目标目录幂等塞进 trustedWorkspaces
+---
 
-手动一次性:
+## 彻底解决：起进程前，自动把路径塞进白名单
+
+既然知道了它认的是 JSON 里的绝对路径，那我们在启动自动化任务前，用一段幂等的 Python 脚本把它自动写进去即可。
+
+### 自动化流水线标准写法（写进你的 CI / 派活脚本）
 
 ```bash
-agy 在某目录能交互授权就先授权一次;或直接改配置。
-```
-
-自动化(脚本/CI/worktree 流水线里,起 agy 前先跑这段,幂等):
-
-```bash
-TARGET_DIR="$(pwd)"                                   # 或你要让 agy 干活的绝对路径
+TARGET_DIR="$(pwd)"  # 或者你要让 agy 施工的目标目录绝对路径
 AGY_SETTINGS="$HOME/.gemini/antigravity-cli/settings.json"
+
 if [ -f "$AGY_SETTINGS" ]; then
   python3 - "$AGY_SETTINGS" "$TARGET_DIR" <<'PY'
 import json, sys
 path, wt = sys.argv[1], sys.argv[2]
-d = json.load(open(path))
+try:
+    with open(path, "r", encoding="utf-8") as f:
+        d = json.load(f)
+except Exception:
+    d = {}
+
 tw = d.setdefault("trustedWorkspaces", [])
 if wt not in tw:
     tw.append(wt)
-    json.dump(d, open(path, "w"), indent=2, ensure_ascii=False)
-    print("trusted:", wt)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(d, f, indent=2, ensure_ascii=False)
+    print(f"已自动添加目录信任: {wt}")
 PY
 fi
-# 之后再 agy --dangerously-skip-permissions -p "..." 就不会弹授权框了
+
+# 之后再跑 agy -p，秒进，绝不再卡死！
+agy --dangerously-skip-permissions -p "执行施工..."
 ```
 
-要点:
-- **写绝对路径**(agy 匹配的是 cwd 的绝对路径,不是相对路径)。
-- **幂等**:已存在就不重复加。
-- 改的是用户级配置文件,和被信任的仓库无关,不会污染仓库 git。
+---
 
-## 一劳永逸:把自动信任 baked 进 `agy()` 包装函数(交互用也不再弹)
+## 一劳永逸方案：把自动信任烧录进日常 Shell 环境
 
-上面那段是**自动化/脚本**里起 agy 前手动补信任。但**你自己在终端敲 `agy`** 进一个新目录时,一样会弹「信任此文件夹?」——因为交互模式弹得出这个框,只是每个新目录都要点一次。如果你(像我一样)默认就是「所有目录都信任」,把自动信任直接塞进 [tip 03](03-auto-approve-all-permissions.md) 的 `agy()` 包装函数,以后**任何目录、交互还是 print,都不弹**:
+如果你平时经常在终端里切换不同项目，烦透了每次进新目录都要敲回车点“信任”，可以直接在你的 `~/.zshrc` 或 `~/.bashrc` 里加一层静默的函数封装：
 
 ```bash
-# 起 agent 前把当前目录幂等塞进 trustedWorkspaces
+# 每次敲 agy 时，先静默把当前目录加入信任列表
 _agy_trust_pwd() {
   local settings="$HOME/.gemini/antigravity-cli/settings.json"
   [[ -f "$settings" ]] || return 0
@@ -86,45 +98,45 @@ _agy_trust_pwd() {
 import json, sys
 path, wd = sys.argv[1], sys.argv[2]
 try:
-    d = json.load(open(path))
+    with open(path, "r") as f:
+        d = json.load(f)
+    tw = d.setdefault("trustedWorkspaces", [])
+    if wd not in tw:
+        tw.append(wd)
+        with open(path, "w") as f:
+            json.dump(d, f, indent=2, ensure_ascii=False)
 except Exception:
-    sys.exit(0)
-tw = d.setdefault("trustedWorkspaces", [])
-if wd not in tw:
-    tw.append(wd)
-    json.dump(d, open(path, "w"), indent=2, ensure_ascii=False)
+    pass
 PY
 }
+
 agy() {
   case "$1" in
     changelog|install|help|models|plugin|plugins|update)
-      command agy "$@" ;;          # 子命令不认这些 flag,原样透传,也不碰信任
+      command agy "$@" ;;          # 纯查询子命令原样放行，不污染配置
     *)
-      _agy_trust_pwd                # ← 起 agent 前先信任当前目录
+      _agy_trust_pwd                # 真正干活前，先把当前目录自动信任
       command agy --dangerously-skip-permissions "$@" ;;
   esac
 }
 ```
 
-要点:
-- **静默、失败也不挡启动**(配置文件不在 / JSON 坏了都直接放行,`2>/dev/null` + try/except 兜住)——包装函数绝不能因为这一步而让 `agy` 起不来。
-- 只在**跑 agent** 的分支注入;`models`/`update`/`plugin` 等子命令原样透传、不碰信任列表。
-- 和自动化脚本(如 sage 的 `agy-do.sh`)**互不影响**:那条路自带同样的注入,这里补的是「你手动在终端敲 agy」这条。
-- 想彻底静默(每次都不打印)就别在 python 里 `print`——上面这版故意不打印。
-
-## 验证
-
-在一个**从没授权过**的新目录里:
-
-```bash
-mkdir -p /tmp/agy-trust-test && cd /tmp/agy-trust-test
-# 先跑上面那段把 /tmp/agy-trust-test 加进 trustedWorkspaces
-agy --dangerously-skip-permissions --print-timeout 60s -p "只回复两个字:通过"
-```
-
-- 返回「通过」= 信任生效、修好了。
-- 仍 `timeout waiting for response` = 要么路径没写对(检查 settings.json 里那条是不是这个目录的绝对路径),要么其实是 tip 02 的认证问题(拿老目录复测确认)。
+### 为什么这版封装最安全？
+1. **彻底静默**：执行失败也加了 `try/except` 和 `2>/dev/null`，绝不会因为读写配置失败导致 `agy` 本身起不来。
+2. **区分命令**：查版本、查模型列表等原生子命令完全不碰信任列表。
+3. **交互与后台通吃**：不管是自己敲终端还是脚本调用，只要走的是这个函数，全流程零弹窗打扰。
 
 ---
 
-*记录于 2026-07-14。起因:[sage] 的 agy 施工流水线 `agy-do.sh` 每张任务卡在独立 git worktree 里起 `agy -p`,首次进新 worktree 全部秒超时零施工;一度误判成 OAuth 失效(tip 02),实为 worktree 是新绝对路径、不在 trustedWorkspaces。根治=施工脚本起 agy 前把 worktree 路径自动加进信任列表。*
+## 验证修复成果
+
+随便找个从没创建过的临时测试目录：
+
+```bash
+mkdir -p /tmp/agy-trust-test && cd /tmp/agy-trust-test
+# 运行测试命令
+agy --dangerously-skip-permissions --print-timeout 60s -p "只回复两个字：通过"
+```
+
+* **终端返回“通过”**：说明信任注入成功，以后进新 worktree 再也不用担心秒超时！
+

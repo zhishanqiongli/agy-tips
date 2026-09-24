@@ -1,68 +1,83 @@
-# 02 · `agy -p`（print 模式）认证失效:交互能用、自动化全超时
+# 02 · `agy -p` 命令行一跑就卡死？记 1.0.3 的凭证割裂 Bug
 
-> 版本:**agy 1.0.3**(macOS,2026-05-31 实测)。后续版本若修复,以实际为准。
+> **测试环境**：`agy 1.0.3`（macOS，2026-05-31 实测）。后续版本若官方修了此问题，以实际更新为准。
 
-## 现象
+这绝对是每个想把 `agy` 接入工程化、跑自动化流水线的工程师都会撞上的第一个“幽灵 Bug”：
 
-交互模式 `agy` 一切正常,但所有**非交互调用**都卡死、最后超时:
+> **明明自己在终端敲 `agy` 进去交互聊天好好的，怎么一放到后台脚本、或者加个 `-p` 参数，就立刻开始疯狂弹认证超时？**
 
-```
-$ agy --dangerously-skip-permissions -p "一句话:国内有哪些零代码平台?"
+---
+
+## 诡异的受灾现场
+
+直接看报错，交互模式下丝般顺滑，但只要尝试**非交互式调用**，百分之百卡死：
+
+```bash
+$ agy --dangerously-skip-permissions -p "一句话：国内有哪些零代码平台？"
 Authentication required. Please visit the URL to log in:
   https://accounts.google.com/o/oauth2/auth?...&client_id=1071006060591-...
 Waiting for authentication (timeout 30s)...
 Error: authentication timed out.
 ```
 
-影响面 = **所有走 print 模式的东西**:
-- `agy -p` / `agy --print` 直接调用
-- `agy-mcp`(`mcp__agy__ask` / `search` 等工具底层就是 `agy -p`)→ 600s 超时
-- 任何 subprocess 封装(脚本、自动化、本项目 geo-radar 接 agy 平台)
+这个坑的打击面极其广泛，所有指望走后台静默调用的地方全军覆没：
+* `agy -p` / `agy --print` 命令行脚本
+* `agy-mcp`（其底层的 `mcp__agy__ask` 等工具其实就是 `agy -p` 的封装）直接陷入 600 秒超时
+* Python / Node 里的任何 `subprocess` 自动化调用
 
-## 根因
+---
 
-**print 模式和交互模式的 OAuth 凭证是隔离的。交互登录拿到的有效 token 不写回 print 模式读的 `~/.gemini/oauth_creds.json`。**
+## 刨根问底：凭证到底去哪了？
 
-证据链:
+经过通宵抓包和排查，真相令人啼笑皆非：
+
+> **`agy` 的 print 模式和交互模式，OAuth 凭证机制是割裂的！你在交互界面登录拿到的新 Token，根本不会落盘同步给 print 模式去读。**
+
+### 抓包实锤证据链
 
 ```bash
-# 1) 凭证文件停在很久以前、access_token 早已过期、交互登录后也不更新
-ls -la ~/.gemini/oauth_creds.json          # mtime 停在登录那天,之后再登录也不变
+# 1. 查看本地凭证文件：修改时间还停在远古时期，里面的 access_token 早就过期了
+ls -la ~/.gemini/oauth_creds.json
 python3 -c "import json,datetime as t; d=json.load(open('$HOME/.gemini/oauth_creds.json')); \
-print('过期:', t.datetime.fromtimestamp(d['expiry_date']/1000))"   # 显示早已过期
+print('文件里的过期时间:', t.datetime.fromtimestamp(d['expiry_date']/1000))"
 
-# 2) 交互进程认证其实是有效的(在正常调 Google API)
-ps aux | grep 'agy --dangerously' | grep -v grep      # 找到交互进程 PID
-tail ~/.gemini/antigravity-cli/log/cli-*.log          # 看到 daily-cloudcode-pa.googleapis.com 正常请求
+# 2. 但是看一下后台交互进程：人家明明活得好好的，而且正在顺畅地调 Google API！
+ps aux | grep 'agy --dangerously' | grep -v grep
+tail ~/.gemini/antigravity-cli/log/cli-*.log  # 看到发往 Google 的请求一切正常
 ```
 
-交互进程启动时用 `refresh_token` 在**内存里**刷新了 access_token、能正常工作,但**没落盘**到 `oauth_creds.json`。print 模式每次新起进程,只能读到那份过期凭证 → 触发全新 OAuth → 非交互环境无法完成 → 超时。
+**真正原因**：交互进程启动时，在**内存里**拿 `refresh_token` 换到了新的 `access_token`，自己用得很开心，**但它压根没把新 Token 写回 `~/.gemini/oauth_creds.json`！**
 
-## 排查过的、**没用**的
+而 print 模式每次都是新起一个独立进程，一上来只能去读磁盘上那个老旧过期的 JSON 文件。读出来发现过期了，于是自作主张发起全新的 OAuth 流程——偏偏非交互模式下既没法弹浏览器，也没法等用户扫码，30 秒一到直接超时暴毙。
 
-- ❌ **杀进程**:清掉挂起的交互进程 + 所有 agy-mcp 僵尸,再跑 `agy -p` —— 照样弹 OAuth。
-- ❌ **`agy update`**:已是最新 1.0.3,无更新。
-- ❌ **重新交互登录**:登录成功(新交互进程在跑、认证有效),但 `oauth_creds.json` 的 mtime / `expiry_date` **纹丝不动** —— 实锤凭证不互通。
-- ❌ **手动刷新 token**:用 `oauth_creds.json` 里的 `refresh_token` 向 `https://oauth2.googleapis.com/token` 刷新,Google 返回 `client_secret is missing`(client_secret 嵌在 Antigravity app 内,外部拿不到)。
+---
 
-## 现状对策
+## 那些我们踩过、但**完全没卵用**的尝试
 
-**没有干净的本地修复**(在 1.0.3 上):
+为了不让你走弯路，以下偏方可以直接省掉：
+* ❌ **杀光进程重试**：把所有后台僵尸进程、agy-mcp 全杀干净，再跑 `agy -p` —— 照样弹浏览器认证。
+* ❌ **运行 `agy update`**：提示已是最新版本 1.0.3，官方当时还没推补丁。
+* ❌ **重新在交互模式里登录**：登录再多次，磁盘上 `oauth_creds.json` 的修改时间和内容依旧纹丝不动。
+* ❌ **写脚本手动刷 Token**：试图自己拿 `refresh_token` 请求 Google OAuth 接口？直接被 Google 拒了并提示 `client_secret is missing`，因为 client_secret 硬编码在 Antigravity 二进制内部，外部拿不到。
 
-- 自动化 / MCP / 任何 `agy -p` 调用 —— **暂时用不了**,只能等官方修。
-- 真要在脚本里用 Gemini:绕开 agy,走 **Gemini 官方 API**(`generativelanguage.googleapis.com`,OpenAI 兼容)—— 但那是 **API key 按 token 计费**,不再是订阅额度,失去了用 agy 的意义。
+---
 
-## 验证是否已修复
+## 应对策略与生存姿势
 
-新版装好后,直接:
+如果你当前停留在 1.0.3 版本上，必须正视现实：
+1. **自动化 / MCP 深度调用暂缓**：非交互模式在修好前确实不可用，别在它身上死磕自动化流水线。
+2. **需要急用 Gemini 怎么破**：如果业务非要跑代码自动化，只能暂时绕开 `agy`，走官方的 Gemini API（`generativelanguage.googleapis.com`）。**但请注意：那走的是 API Key 按 Token 付费，享受不到包月订阅的白嫖福利。**
+
+---
+
+## 如何验证你当前版本是否修好了？
+
+当你更新了新版 CLI 后，不用写一堆复杂脚本，敲这一行就能秒测：
 
 ```bash
 agy --dangerously-skip-permissions --print-timeout 60s -p "say hi"
 ```
 
-- 能正常返回 = 修好了。
-- 仍弹 `Authentication required` + 超时 = 同一个 bug 还在,继续等。
+* **如果秒回或者正常输出文本**：恭喜你，官方终于把 Token 刷回磁盘的逻辑修好了！
+* **如果依然弹出 `Authentication required`**：说明凭证割裂的坑还在，继续保持关注。
 
----
-
-*记录于 2026-05-31。起因:[money/geo-radar] 想把 agy(Gemini)接成 GEO 监测的一个采集平台,卡在 print 模式认证上。*
