@@ -396,6 +396,15 @@ def create_offline_snapshot(
     return bak_dir
 
 
+def _sanitize_path(path: str) -> str:
+    home = os.path.expanduser("~")
+    if path == home:
+        return "~"
+    if path.startswith(home + os.sep):
+        return "~" + path[len(home) :]
+    return path
+
+
 def process_db(
     label: str,
     db_path: str,
@@ -404,10 +413,10 @@ def process_db(
     explicit_proxy: str,
     verbose: bool,
 ) -> int:
-    db_path = os.path.expanduser(db_path)
+    db_path = os.path.abspath(os.path.expanduser(db_path))
     if not os.path.exists(db_path):
         if verbose:
-            print(f"[{label}] 跳过：未找到数据库 {db_path}")
+            print(f"[{label}] 跳过：未找到数据库 {_sanitize_path(db_path)}")
         return 0
 
     base_dir = os.path.dirname(db_path)
@@ -466,8 +475,10 @@ def process_db(
             pb_t = pbtxt_titles.get(cid, "")
             if needs_translation(pb_t):
                 pending_texts.append(pb_t.strip())
+        proto_pending_texts: List[str] = []
         for pp in proto_paths:
-            pending_texts.extend(collect_proto_texts(pp))
+            proto_pending_texts.extend(collect_proto_texts(pp))
+        pending_texts.extend(proto_pending_texts)
 
         if not pending_texts:
             conn.close()
@@ -536,8 +547,11 @@ def process_db(
             elif t_changed and cid in pbtxt_titles:
                 pbtxt_updates.append((os.path.join(ann_dir, f"{cid}.pbtxt"), new_t))
 
+        proto_has_zh_updates = any(
+            cap_translated(translations.get(t, ""), t, 45) for t in proto_pending_texts
+        )
         snapshot_dir = ""
-        if (updates or pbtxt_updates) and not dry_run and not no_backup:
+        if (updates or pbtxt_updates or proto_has_zh_updates) and not dry_run and not no_backup:
             create_rolling_backup(conn, db_path)
             if is_desktop:
                 snapshot_dir = create_offline_snapshot(conn, base_dir, proto_paths, ann_dir)
@@ -587,7 +601,7 @@ def process_db(
         if verbose:
             prefix = "[dry-run] " if dry_run else ""
             route_desc = proxy if proxy else "直连"
-            bak_note = f"，备份: {snapshot_dir}" if snapshot_dir else ""
+            bak_note = f"，备份: {_sanitize_path(snapshot_dir)}" if snapshot_dir else ""
             print(
                 f"✓ [{label}] {prefix}成功汉化 {db_updated} 条 DB 会话记录、"
                 f"{pbtxt_updated} 个 annotations 文件、"
