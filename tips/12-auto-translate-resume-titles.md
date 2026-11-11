@@ -41,12 +41,22 @@
 
 随时可以手动试跑或全量执行：
 ```bash
-# 仅试译统计，不落盘
+# CLI 端仅试译统计，不落盘
 agy-title-zh --dry-run -v
 
-# 全量汉化（自动写一份 .bak 滚动备份）
+# CLI 端全量汉化（自动写一份 .bak 滚动备份）
 agy-title-zh -v
+
+# 桌面端（~/.gemini/antigravity/）离线批量汉化：
+# 1) 预览可在线安全执行
+agy-title-zh --target desktop --dry-run -v
+# 2) 正式写入前必须先完全退出 Antigravity 桌面端（脚本会用 lsof 校验进程锁），
+#    然后运行离线汉化（自动同步 agyhub_summaries_proto.pb 并留存完整快照备份）：
+agy-title-zh --target desktop -v
 ```
+
+> [!IMPORTANT]
+> 桌面端运行中时，`language_server` 进程会持续持有 `conversation_summaries.db` 与 `agyhub_summaries_proto.pb` 并在内存里缓存标题。因此正式写入桌面端（`--target desktop`）必须**完全退出桌面客户端后离线运行**，脚本内也内置了 `lsof` 进程占用拦截防止强写损毁。
 
 ### 2. 在 Wrapper 退出钩子中无感调用
 

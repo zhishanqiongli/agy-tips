@@ -55,7 +55,7 @@
 | [`agy-tunnel`](scripts/agy-tunnel) | **出口隧道守护**：自建 SOCKS5 代理管理（启动/停止/状态检测/公网 IP 校验） | [Tip 06](tips/06-dedicated-exit-ip.md) |
 | [`agy-ps`](scripts/agy-ps) | **进程卫士**：检测活跃与僵尸 agy 进程，避免多实例竞争刷崩 OAuth Token | [Tip 15](tips/15-multiple-instances-refresh-token-race-401.md) |
 | [`agy-hide-bridge`](scripts/agy-hide-bridge) | **隐藏桥接临时会话**：移出 0 步探测与纯临时 bridge 会话，剥离双工作区临时路径（共用 [`_agy_pb.py`](scripts/_agy_pb.py)） | [Tip 16](tips/16-hide-magpie-bridge-sessions-and-dual-store.md) |
-| [`agy-title-zh`](scripts/agy-title-zh) | **会话标题汉化**：同步汉化 `conversation_summaries.db`、`jetbox_summaries_proto.pb` 与 `annotations/`（共用 [`_agy_pb.py`](scripts/_agy_pb.py)） | [Tip 12](tips/12-auto-translate-resume-titles.md) |
+| [`agy-title-zh`](scripts/agy-title-zh) | **会话标题汉化**：支持 CLI 与桌面端离线批量汉化 `conversation_summaries.db`、`*_summaries_proto.pb` 与 `annotations/`（共用 [`_agy_pb.py`](scripts/_agy_pb.py)） | [Tip 12](tips/12-auto-translate-resume-titles.md) |
 | [`check-upstream.sh`](scripts/check-upstream.sh) | **上游更新探测**：安全抓取 `upstream` 变更清单而不覆盖本地改造 | [UPSTREAM_SYNC](UPSTREAM_SYNC.md) |
 
 ---
