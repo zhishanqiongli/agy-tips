@@ -17,8 +17,8 @@
 * [01 · 用订阅额度白嫖画图，拒绝按量计费](tips/01-image-gen-with-subscription.md) —— 官方 SDK 只认 API key 扣费？教你直接走 CLI OAuth 免费跑 Nano Banana，一行命令搞定。
 
 ### 🛡️ 权限、认证与奇葩超时（新手必崩环节）
-* [02 · `agy -p` 命令行一跑就卡死？记 1.0.3 的凭证割裂 Bug](tips/02-print-mode-auth-bug.md) —— 交互界面明明好好的，脚本一调就报 `Authentication timed out`？来看看交互与 print 模式的凭证深坑。
-* [03 · 别再问我要不要执行了！一键自动放行全部权限](tips/03-auto-approve-all-permissions.md) —— 每次改文件都要手动按 `Yes` 令人抓狂？教你用 Wrapper 永久注入 `--dangerously-skip-permissions`。
+* [02 · `agy -p` 命令行一跑就卡死？记 1.0.3 的凭证割裂 Bug（新版已修）](tips/02-print-mode-auth-bug.md) —— 历史版本排查实录：旧版 `1.0.3` 交互与 print 模式凭证割裂（新版已切系统 Keyring 静默鉴权）。
+* [03 · 别再问我要不要执行了！一键自动放行全部权限](tips/03-auto-approve-all-permissions.md) —— 支持在 `settings.json` 配 `"toolPermission": "always-proceed"`，也可用 Wrapper 注入 `--dangerously-skip-permissions`。
 * [04 · 新目录 / Git Worktree 里秒超时？这不是认证挂了，是文件夹未信任](tips/04-worktree-untrusted-folder-print-timeout.md) —— 很多人排查几天都怀疑账号被风控，其实只要两行脚本把路径塞进 `trustedWorkspaces`。
 * [15 · 多个终端同时开 agy 互相踢下线？排查 OAuth Token 刷新竞争](tips/15-multiple-instances-refresh-token-race-401.md) —— 并行开两三个实例干活，结果全部 401 掉线？教你用守护进程清理闲置实例。
 
@@ -36,7 +36,8 @@
 ### 🎨 终端体验与舒适度调优
 * [07 · 终端 Markdown 渲染与排版避坑：为什么会看到 #### 与最佳排版姿势](tips/07-terminal-markdown-rendering.md) —— 治好终端乱码、错位和原生语法不解析的强迫症。
 * [11 · 自定义状态栏：一眼看清当前模型、执行模式、剩余上下文与额度](tips/11-custom-statusline.md) —— 抄作业！三行信息清清楚楚，不用手动敲命令探查。
-* [12 · 汉化 /resume 会话列表：退出时异步回写 SQLite 数据库](tips/12-auto-translate-resume-titles.md) —— 原生生成的全是英文长句？退出时自动翻译成中文存进本地库。
+* [12 · 汉化 /resume 会话列表：同步回写 SQLite、Proto Store 与注解](tips/12-auto-translate-resume-titles.md) —— 原生生成的全是英文短句？退出时自动翻译成中文并防止启动对账还原。
+* [16 · 隐藏 /resume 中的 magpie-agy-bridge 临时会话（附启动对账避坑）](tips/16-hide-magpie-bridge-sessions-and-dual-store.md) —— 清理 0 步探测与纯临时桥接会话，剥离双工作区里的临时路径。
 
 ---
 
@@ -50,10 +51,12 @@
 | [`genimg.sh`](scripts/genimg.sh) | **一行命令画图**：走订阅额度，直接生成图片并保存到桌面 | [Tip 01](tips/01-image-gen-with-subscription.md) |
 | [`agy-do`](scripts/agy-do) | **任务卡施工派发器**：Git Worktree 隔离 + 逃逸检测 + 自动异步验收 | [Tip 05](tips/05-claude-drives-agy-construction-mode.md) |
 | [`agy-runs`](scripts/agy-runs) | **施工看板**：列出后台正在跑的施工任务、待验收及报错日志 | [Tip 05](tips/05-claude-drives-agy-construction-mode.md) |
-| [`agy-wrapper`](scripts/agy-wrapper) | **智能包装层**：自动注入免授权 flag、专用出口代理及会话标题汉化 | [Tip 03](tips/03-auto-approve-all-permissions.md) / [Tip 06](tips/06-dedicated-exit-ip.md) |
+| [`agy-wrapper`](scripts/agy-wrapper) | **智能包装层**：自动注入免授权 flag、专用出口代理、隐藏桥接会话与标题汉化 | [Tip 03](tips/03-auto-approve-all-permissions.md) / [Tip 06](tips/06-dedicated-exit-ip.md) |
 | [`agy-tunnel`](scripts/agy-tunnel) | **出口隧道守护**：自建 SOCKS5 代理管理（启动/停止/状态检测/公网 IP 校验） | [Tip 06](tips/06-dedicated-exit-ip.md) |
 | [`agy-ps`](scripts/agy-ps) | **进程卫士**：检测活跃与僵尸 agy 进程，避免多实例竞争刷崩 OAuth Token | [Tip 15](tips/15-multiple-instances-refresh-token-race-401.md) |
-| [`agy-title-zh`](scripts/agy-title-zh) | **会话标题汉化**：扫描 `conversations.db` 并批量中文化会话名 | [Tip 12](tips/12-auto-translate-resume-titles.md) |
+| [`agy-hide-bridge`](scripts/agy-hide-bridge) | **隐藏桥接临时会话**：移出 0 步探测与纯临时 bridge 会话，剥离双工作区临时路径（共用 [`_agy_pb.py`](scripts/_agy_pb.py)） | [Tip 16](tips/16-hide-magpie-bridge-sessions-and-dual-store.md) |
+| [`agy-title-zh`](scripts/agy-title-zh) | **会话标题汉化**：同步汉化 `conversation_summaries.db`、`jetbox_summaries_proto.pb` 与 `annotations/`（共用 [`_agy_pb.py`](scripts/_agy_pb.py)） | [Tip 12](tips/12-auto-translate-resume-titles.md) |
+| [`check-upstream.sh`](scripts/check-upstream.sh) | **上游更新探测**：安全抓取 `upstream` 变更清单而不覆盖本地改造 | [UPSTREAM_SYNC](UPSTREAM_SYNC.md) |
 
 ---
 

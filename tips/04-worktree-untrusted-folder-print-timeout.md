@@ -112,8 +112,8 @@ PY
 
 agy() {
   case "$1" in
-    changelog|install|help|models|plugin|plugins|update)
-      command agy "$@" ;;          # 纯查询子命令原样放行，不污染配置
+    acp|agent|agents|changelog|help|install|mcp|mic-serve|models|plugin|plugins|remote-control|update|-h|--help|-v|--version)
+      command agy "$@" ;;          # 纯查询或协议子命令原样放行，不污染配置与参数
     *)
       _agy_trust_pwd                # 真正干活前，先把当前目录自动信任
       command agy --dangerously-skip-permissions "$@" ;;

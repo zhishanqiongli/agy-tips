@@ -46,10 +46,9 @@
 ### 第一步：请立即完整阅读 `./CLAUDE.md`
 所有代码风格、测试规范与项目上下文均以 `./CLAUDE.md` 为准。在阅读过程中，若遇到你无法执行的特有机制，请按以下清单处理：
 
-### 🚫 忽略清单（Claude 专属特权，跳过即可）
-- Claude 的 Memory 记忆系统、Sub-Agent（Task/Agent 委托派发机制）、TaskCreate 待办标签
-- SessionStart Hook 注入机制、特定 statusLine 自定义字段
-- `.claude/skills/` 下的专属命令——若未被当前环境挂载，直接回复不支持，严禁猜测伪造
+### 🚫 忽略清单（Claude 专属机制，按实际环境处理）
+- Claude 的 Memory 记忆系统、TaskCreate 待办标签与 Claude 专属 `Task` 工具用法
+- 仅在 `.claude/` 目录存在且当前 `agy` 未挂载对应插件/Hook 时，勿猜测伪造 `.claude/skills/` 专属命令（注：新版 `agy` 已原生支持自身的 `invoke_subagent`、`hooks.json` 与 `.agents/skills/`）
 
 ### 🛡️ 照做清单（全员安全硬指标）
 - **产物隔离**：所有生成的临时文件、脚本或新 Skill，**一律留在当前项目工作区内，严禁写入 `~/dotfiles` 或任何外部全局目录**！
@@ -61,7 +60,7 @@
 
 ## 进阶：如何区分“被派活的施工员”与“交互司机”？
 
-如果你的项目已经深度接入了司机施工模式（由 Claude 在后台派发 `scripts/agy-do.sh`），你可以在 `AGENTS.md` 头部加一段**身份判定**：
+如果你的项目已经深度接入了司机施工模式（由 Claude 在后台派发 [`scripts/agy-do`](../scripts/agy-do)），你可以在 `AGENTS.md` 头部加一段**身份判定**：
 
 ```markdown
 ## 身份与模式自适应

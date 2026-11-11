@@ -39,6 +39,7 @@ AGY_BIN = shutil.which("agy") or "/Users/yourname/.local/bin/agy"
 
 ### Python 稳健写法
 ```python
+import os
 import shutil
 from pathlib import Path
 

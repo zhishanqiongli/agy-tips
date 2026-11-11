@@ -39,8 +39,10 @@ agy -p "生成一张 1024x1024 的小狗照片，背景蓝色渐变，保存到 
 别急着跑脚本，先花 10 秒钟确认两件事：
 
 ```bash
-# 1. 确认你当前登录的是个人订阅账号（OAuth），而不是配了 API Key
-agy plugin list
+# 1. 确认当前走 OAuth 订阅账号而非 API Key 模式
+#    - 未设置 GEMINI_API_KEY 且 settings.json 中 modelProvider 不为 "gemini"
+#    - 查看可用模型列表（同时验证鉴权已就绪）
+agy models
 
 # 2. 检查生图插件装上没（默认安装包可能没勾选 Nano Banana）
 agy plugin list | grep -iE "image|banana|nano"
@@ -78,6 +80,6 @@ subprocess.run(["~/scripts/genimg.sh", prompt, out_path], check=True, shell=Fals
 ## 💡 几个走心的血泪教训
 
 1. **别以为买了 Ultra 就能无限刷图**：Nano Banana Pro 在 2026 年 2 月收紧过配额策略，生图有独立的每日配额上限。即使你掏了 $200/月，拿它当批量爬虫图库刷也是会被暂时限流的，合理安排任务间隔。
-2. **服务器 / CI 上跑怎么办**：服务器没有图形界面没法扫码登录。通常的做法是在本地 Mac/Linux 机器上登录好，把凭证目录（`~/.gemini/antigravity-cli/` 等）直接打包 scp 过去。注意 Token 有效期，过期还是需要刷新。
+2. **服务器 / CI 上跑怎么办**：无头环境无法本地弹出浏览器登录。新版 `agy`（1.5.5 实测）在 macOS 等桌面系统上已将 OAuth 凭证存入系统钥匙串（Keyring），单纯打包拷贝 `~/.gemini/antigravity-cli/` 并不能跨机迁移登录态；无头服务器如需运行，通常需在目标机完成 CLI 授权或使用 `GEMINI_API_KEY`（按量计费）。
 3. **安全警示**：`--dangerously-skip-permissions` 虽然爽，但它是把最高权限交给了模型。如果是在线上服务中接收不可信用户的 Prompt，千万做好敏感词与路径注入过滤，别让模型顺手帮你把系统文件给删了。
 

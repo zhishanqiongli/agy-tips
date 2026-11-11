@@ -70,11 +70,19 @@ agy models  # 能正常输出模型列表，说明 wrapper 工作正常且没打
 
 ---
 
-## 很多人好奇：为什么不能在某个 JSON 配置里改？
+## 现在也可以在 `settings.json` 里直接配置（新版已支持）
 
-我也去翻过源码和配置文件。遗憾的是，`agy` 目前根本没有提供明文的全局权限配置项。它的权限记忆是按照会话分别保存在 **Protobuf 二进制文件**（`~/.gemini/antigravity-cli/implicit/*.pb`）里的，根本没有一个类似于 `settings.json -> "autoApprove": true` 的全局布尔开关。
+在较早版本中，`agy` 确实没有全局 JSON 免授权开关，权限记忆主要按会话存放在 `~/.gemini/antigravity-cli/implicit/*.pb` 中；因此在早期只有 **PATH 拦截 + Wrapper 注入** 一条路。
 
-因此，上面这套 **PATH 拦截 + Wrapper 注入** 是目前最干净、最稳定的唯一通用解法。
+但从当前新版（如 `agy 1.5.5` 实测）开始，`~/.gemini/antigravity-cli/settings.json` 已经原生支持全局权限字段：
+
+```json
+{
+  "toolPermission": "always-proceed"
+}
+```
+
+不过如果你同时还需要自动钉住 `--add-dir`、挂载专用代理或退出后异步汉化标题，继续配合仓库里的 [`scripts/agy-wrapper`](../scripts/agy-wrapper) 依然最省心。
 
 ---
 

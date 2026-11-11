@@ -25,17 +25,17 @@ E0828 16:07:00 errorreport.go:223] agent executor error: calling model:
 
 ---
 
-## 刨根问底：凭证只有一份，但刷新者有千千万
+## 刨根问底：凭证全局共享，但刷新者有千千万
 
-Antigravity CLI 的登录凭证保存在本地磁盘：
+Antigravity CLI 在早期版本中曾把登录凭证保存在本地磁盘：
 
 ```text
 ~/.gemini/antigravity-cli/antigravity-oauth-token
 ```
 
-注意：**全局就这么孤零零的一份！**
+而在新版（如 `agy 1.5.5` macOS 实测）中，OAuth 凭证已迁移至**系统钥匙串（Keyring）**中持久化（日志可见 `keyringAuth: loaded token`）。但无论落盘在文件还是钥匙串中，**当前登录账号的凭证对整机所有 `agy` 进程仍是同一份全局共享状态**！
 
-但每一个启动起来的 `agy` 进程，内部都会自作聪明地起一个后台协程，每隔大约一小时偷偷去 Google 刷一次这个 Token。
+每一个启动起来的 `agy` 进程，内部都会在后台按周期向 Google 刷新 Token。
 
 翻开当时的并发日志，你会看到两个不同的终端实例在背地里疯狂打架（前面的数字是内部协程 ID）：
 

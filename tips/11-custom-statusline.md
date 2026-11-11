@@ -17,7 +17,7 @@
 
 ```text
 macbook-pro · ~/Documents/my-project (git:main*)
-3.7 Flash · exec med skip · ctx 95% · 5h 93% ~02:44 · 7d 92%
+3.8 Flash · exec high skip · ctx 95% · 5h 93% ~02:44 · 7d 92%
 正在重构订单支付超时自动关闭逻辑
 ```
 
@@ -35,14 +35,14 @@ macbook-pro · ~/Documents/my-project (git:main*)
 {
   "statusLine": {
     "type": "command",
-    "command": "/Users/xiaochen/github/agy-tips/scripts/statusline.sh"
+    "command": "/path/to/agy-tips/scripts/statusline.sh"
   }
 }
 ```
 
 > [!NOTE]
 > **底层运作机制**：  
-> 每当 Agent 状态有更新（执行了一次命令、生成了一段回复），`agy` 就会把包含了 `model`、`context_window`、`quota`、`mode`、`workspace` 等信息的 JSON 状态包，通过标准输入（`stdin`）喂给你的脚本。你的脚本只需要从标准输出（`stdout`）打印拼好的字符串，CLI 就会负责渲染到底部。
+> 每当 Agent 状态有更新（执行了一次命令、生成了一段回复），`agy` 就会把包含了 `model`、`context_window`、`quota`、`cost`（1.1.21+ 新增）、`mode`、`workspace` 等信息的 JSON 状态包，通过标准输入（`stdin`）喂给你的脚本。你的脚本只需要从标准输出（`stdout`）打印拼好的字符串，CLI 就会负责渲染到底部。
 
 ---
 
@@ -50,7 +50,7 @@ macbook-pro · ~/Documents/my-project (git:main*)
 
 完整可以直接拿去用的脚本见 [`scripts/statusline.sh`](../scripts/statusline.sh)，里面的几个细节值得品味：
 
-1. **自动提取精简模型名**：原始字段返回的是冗长的 `"Gemini 3.7 Flash (Medium)"`，脚本用 `sed` 顺滑地剔除了厂商前缀和括号说明，在狭窄的终端里只留核心字眼 `3.7 Flash`。
+1. **自动提取精简模型名**：原始字段返回的是冗长的 `"Gemini 3.8 Flash (High)"`（或早期 `"Gemini 3.7 Flash (Medium)"`），脚本用 `sed` 顺滑地剔除了厂商前缀和括号说明，在狭窄的终端里只留核心字眼 `3.8 Flash`。
 2. **上下文余量实时换算**：从 `.context_window.remaining_percentage` 拿到浮点数，自动四舍五入为直观的百分比整数。
 3. **额度预警与恢复倒计时**：读取 `.quota["gemini-5h"]` 和 `.quota["gemini-weekly"]`，把秒级时间戳直接换算成“几点几分恢复”，打工人再也不用自己心算时差。
 4. **CJK（中日韩）字符宽度对齐**：中文在终端里占 2 个字符宽度，直接按字节或者字符截断会导致排版错位甚至截出乱码。脚本里实现了一个小巧的 `cw`（char width）函数，按照 Unicode 编码区间判断全角/半角，优雅截断。

@@ -1,0 +1,422 @@
+#!/usr/bin/env python3
+"""
+agy-hide-bridge: 隐藏 agy CLI /resume 中的 magpie-agy-* 临时桥接与探测会话。
+- 0 步探测幽灵（magpie-agy-models-* 等）与纯临时目录 bridge 会话：无损移入备份目录，
+  并从 SQLite、conversations_fts、jetbox_summaries_proto.pb 与 cache 中移除，防止启动对账复活；
+- 同时挂载真实项目路径的桥接会话：保留完整会话，仅剥离 workspace_uris、raw_summary、
+  jetbox_summaries_proto.pb、FTS 与缓存中的 magpie-agy-* 临时路径，避免污染工作区分组列表。
+"""
+
+import argparse
+from datetime import datetime
+import json
+import os
+import re
+import shutil
+import sqlite3
+import sys
+from typing import Dict, List, Optional, Set, Tuple
+
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+from _agy_pb import (  # noqa: E402
+    atomic_write_bytes,
+    atomic_write_text,
+    create_rolling_backup,
+    encode_pb_fields,
+    parse_pb_fields,
+    upsert_len_field,
+)
+
+DEFAULT_BASE_DIR = os.path.expanduser("~/.gemini/antigravity-cli")
+BRIDGE_URI_RE = re.compile(
+    r"(?:^|/)(?:private/var/folders|var/folders|tmp)/.*/magpie-agy-[^/]+/?$"
+    r"|/magpie-agy-(?:bridge|models|usage)-[^/]+/?$"
+)
+
+
+def is_bridge_uri(uri: str) -> bool:
+    """判断 URI 是否为 magpie-agy-bridge/models/usage 产生的临时工作区路径。"""
+    if not uri:
+        return False
+    clean = uri[len("file://") :] if uri.startswith("file://") else uri
+    return bool(BRIDGE_URI_RE.search(clean))
+
+
+def _ws_meta_uri(ws_meta_blob: bytes) -> str:
+    fields = parse_pb_fields(ws_meta_blob) or []
+    for fn, wt, payload in fields:
+        if fn == 1 and wt == 2:
+            return payload.decode("utf-8", errors="replace")
+    return ""
+
+
+def strip_bridge_workspaces_pb(blob: Optional[bytes]) -> Optional[bytes]:
+    """从 CascadeTrajectorySummary protobuf 中剥离 magpie-agy-* 工作区与路径。"""
+    if not blob:
+        return blob
+    fields = parse_pb_fields(blob)
+    if fields is None:
+        return blob
+
+    changed = False
+    new_fields: List[Tuple[int, int, bytes]] = []
+    for fn, wt, payload in fields:
+        if fn == 9 and wt == 2:
+            if is_bridge_uri(_ws_meta_uri(payload)):
+                changed = True
+                continue
+            new_fields.append((fn, wt, payload))
+        elif fn == 17 and wt == 2:
+            sub_fields = parse_pb_fields(payload)
+            if sub_fields is None:
+                new_fields.append((fn, wt, payload))
+                continue
+            new_sub: List[Tuple[int, int, bytes]] = []
+            sub_changed = False
+            for sfn, swt, spayload in sub_fields:
+                if sfn == 1 and swt == 2 and is_bridge_uri(_ws_meta_uri(spayload)):
+                    sub_changed = True
+                    continue
+                if sfn == 7 and swt == 2 and is_bridge_uri(spayload.decode("utf-8", errors="replace")):
+                    sub_changed = True
+                    continue
+                new_sub.append((sfn, swt, spayload))
+            if sub_changed:
+                changed = True
+                new_fields.append((fn, wt, encode_pb_fields(new_sub)))
+            else:
+                new_fields.append((fn, wt, payload))
+        else:
+            new_fields.append((fn, wt, payload))
+
+    if not changed:
+        return blob
+    patched = encode_pb_fields(new_fields)
+    if parse_pb_fields(patched) is None:
+        return blob
+    return patched
+
+
+def _pb_has_only_bridge_ws(blob: bytes) -> Tuple[bool, bool]:
+    """返回 (has_bridge_ws, has_real_ws)。"""
+    fields = parse_pb_fields(blob) or []
+    has_bridge = False
+    has_real = False
+    for fn, wt, payload in fields:
+        if fn == 9 and wt == 2:
+            uri = _ws_meta_uri(payload)
+            if uri:
+                if is_bridge_uri(uri):
+                    has_bridge = True
+                else:
+                    has_real = True
+    return has_bridge, has_real
+
+
+def _pb_step_count(blob: bytes) -> int:
+    fields = parse_pb_fields(blob) or []
+    for fn, wt, payload in fields:
+        if fn == 2 and wt == 0:
+            val = 0
+            for idx, b in enumerate(payload):
+                val |= (b & 0x7F) << (7 * idx)
+            return val
+    return 0
+
+
+def workspace_display_names(uris: List[str]) -> str:
+    names: List[str] = []
+    for u in uris:
+        clean = u[len("file://") :] if u.startswith("file://") else u
+        leaf = os.path.basename(clean.rstrip("/"))
+        if leaf and leaf not in names:
+            names.append(leaf)
+    return " ".join(names)
+
+
+def move_session_files_to_backup(
+    base_dir: str, backup_dir: str, cids: Set[str], dry_run: bool
+) -> int:
+    """将待隐藏会话的实体库、brain 与注解移至备份目录，避免启动对账重新恢复。"""
+    moved = 0
+    for cid in sorted(cids):
+        candidates = [
+            (os.path.join(base_dir, "conversations", f"{cid}.db"), os.path.join(backup_dir, "conversations", f"{cid}.db")),
+            (os.path.join(base_dir, "conversations", f"{cid}.db-wal"), os.path.join(backup_dir, "conversations", f"{cid}.db-wal")),
+            (os.path.join(base_dir, "conversations", f"{cid}.db-shm"), os.path.join(backup_dir, "conversations", f"{cid}.db-shm")),
+            (os.path.join(base_dir, "brain", cid), os.path.join(backup_dir, "brain", cid)),
+            (os.path.join(base_dir, "annotations", f"{cid}.pbtxt"), os.path.join(backup_dir, "annotations", f"{cid}.pbtxt")),
+        ]
+        for src, dst in candidates:
+            if os.path.exists(src):
+                if not dry_run:
+                    os.makedirs(os.path.dirname(dst), mode=0o700, exist_ok=True)
+                    shutil.move(src, dst)
+                moved += 1
+    return moved
+
+
+def update_jetbox_proto(
+    proto_path: str,
+    remove_cids: Set[str],
+    strip_cids: Set[str],
+    dry_run: bool,
+    create_bak: bool,
+) -> Tuple[int, int]:
+    """从 jetbox_summaries_proto.pb 删除待隐藏条目并剥离双工作区条目里的 bridge 路径。"""
+    if not os.path.isfile(proto_path):
+        return 0, 0
+    blob = open(proto_path, "rb").read()
+    entries = parse_pb_fields(blob)
+    if not entries:
+        return 0, 0
+
+    new_entries: List[Tuple[int, int, bytes]] = []
+    removed = 0
+    stripped = 0
+    for fn, wt, payload in entries:
+        if fn != 1 or wt != 2:
+            new_entries.append((fn, wt, payload))
+            continue
+        kv = parse_pb_fields(payload)
+        if not kv:
+            new_entries.append((fn, wt, payload))
+            continue
+        cid = next((p.decode("utf-8", errors="replace") for f, w, p in kv if f == 1 and w == 2), "")
+        val = next((p for f, w, p in kv if f == 2 and w == 2), b"")
+        if cid in remove_cids:
+            removed += 1
+            continue
+        if cid and val:
+            has_bridge, has_real = _pb_has_only_bridge_ws(val)
+            if has_bridge and (not has_real or _pb_step_count(val) == 0):
+                removed += 1
+                continue
+            if cid in strip_cids or (has_bridge and has_real):
+                new_val = strip_bridge_workspaces_pb(val)
+                if new_val and new_val != val:
+                    new_kv = upsert_len_field(kv, 2, new_val)
+                    new_entries.append((fn, wt, encode_pb_fields(new_kv)))
+                    stripped += 1
+                    continue
+        new_entries.append((fn, wt, payload))
+
+    if (removed or stripped) and not dry_run:
+        out_blob = encode_pb_fields(new_entries)
+        if parse_pb_fields(out_blob) is not None:
+            if create_bak:
+                shutil.copy2(proto_path, proto_path + ".bak")
+            atomic_write_bytes(proto_path, out_blob, prefix=".hidebridge_pb_")
+    return removed, stripped
+
+
+def update_cache_json(
+    cache_dir: str,
+    remove_cids: Set[str],
+    strip_cids: Set[str],
+    dry_run: bool,
+    create_bak: bool,
+) -> int:
+    """清理 conversation_metadata.json 与 last_conversations.json 中的 bridge 条目或临时 URI。"""
+    changes = 0
+    meta_path = os.path.join(cache_dir, "conversation_metadata.json")
+    if os.path.isfile(meta_path):
+        try:
+            meta = json.load(open(meta_path, "r", encoding="utf-8"))
+        except Exception:
+            meta = {}
+        convs = meta.get("conversations")
+        if isinstance(convs, dict):
+            new_convs = {}
+            meta_changed = False
+            for cid, entry in convs.items():
+                if cid in remove_cids:
+                    meta_changed = True
+                    changes += 1
+                    continue
+                summary = entry.get("summary") if isinstance(entry, dict) else None
+                ws_list = summary.get("WorkspaceURIs") if isinstance(summary, dict) else None
+                if isinstance(ws_list, list):
+                    real_ws = [u for u in ws_list if isinstance(u, str) and not is_bridge_uri(u)]
+                    had_bridge = len(real_ws) != len(ws_list)
+                    steps = summary.get("NumSteps", 0)
+                    if had_bridge and (not real_ws or steps == 0):
+                        meta_changed = True
+                        changes += 1
+                        continue
+                    if had_bridge or cid in strip_cids:
+                        if had_bridge:
+                            summary["WorkspaceURIs"] = real_ws
+                            meta_changed = True
+                            changes += 1
+                new_convs[cid] = entry
+            if meta_changed and not dry_run:
+                if create_bak:
+                    shutil.copy2(meta_path, meta_path + ".bak")
+                meta["conversations"] = new_convs
+                atomic_write_text(
+                    meta_path,
+                    json.dumps(meta, indent=2, ensure_ascii=False),
+                    prefix=".hidebridge_meta_",
+                )
+
+    last_path = os.path.join(cache_dir, "last_conversations.json")
+    if os.path.isfile(last_path):
+        try:
+            last_data = json.load(open(last_path, "r", encoding="utf-8"))
+        except Exception:
+            last_data = {}
+        if isinstance(last_data, dict):
+            new_last = {
+                ws: cid
+                for ws, cid in last_data.items()
+                if not is_bridge_uri(ws) and cid not in remove_cids
+            }
+            if len(new_last) != len(last_data):
+                changes += len(last_data) - len(new_last)
+                if not dry_run:
+                    if create_bak:
+                        shutil.copy2(last_path, last_path + ".bak")
+                    atomic_write_text(
+                        last_path,
+                        json.dumps(new_last, indent=2, ensure_ascii=False),
+                        prefix=".hidebridge_last_",
+                    )
+    return changes
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="隐藏 agy CLI 中的 magpie-agy-* 临时会话")
+    parser.add_argument("--base-dir", default=DEFAULT_BASE_DIR, help="agy CLI 数据目录")
+    parser.add_argument("--dry-run", action="store_true", help="仅预览统计，不修改任何文件")
+    parser.add_argument("--no-backup", action="store_true", help="跳过 DB/proto 滚动 .bak 备份")
+    parser.add_argument("-v", "--verbose", action="store_true", help="打印详细执行结果")
+    args = parser.parse_args()
+
+    base_dir = os.path.expanduser(args.base_dir)
+    db_path = os.path.join(base_dir, "conversation_summaries.db")
+    if not os.path.isfile(db_path):
+        if args.verbose:
+            print(f"跳过：未找到数据库 {db_path}")
+        return 0
+
+    proto_path = os.path.join(base_dir, "jetbox_summaries_proto.pb")
+    cache_dir = os.path.join(base_dir, "cache")
+
+    try:
+        conn = sqlite3.connect(db_path, timeout=5.0)
+        c = conn.cursor()
+        rows = c.execute(
+            "SELECT conversation_id, step_count, last_user_input_step_index, workspace_uris, raw_summary "
+            "FROM conversation_summaries"
+        ).fetchall()
+
+        remove_cids: Set[str] = set()
+        strip_updates: List[Tuple[str, Optional[bytes], str, str]] = []
+        strip_cids: Set[str] = set()
+
+        for cid, step_count, last_user_idx, ws_json, raw_summary in rows:
+            try:
+                uris = json.loads(ws_json) if ws_json else []
+            except Exception:
+                uris = []
+            if not isinstance(uris, list):
+                uris = []
+            bridge_uris = [u for u in uris if isinstance(u, str) and is_bridge_uri(u)]
+            if not bridge_uris:
+                continue
+            real_uris = [u for u in uris if isinstance(u, str) and not is_bridge_uri(u)]
+            is_zero = (step_count or 0) == 0 and (last_user_idx if last_user_idx is not None else -1) == -1
+            if is_zero or not real_uris:
+                remove_cids.add(cid)
+            else:
+                new_ws_json = json.dumps(real_uris, separators=(",", ":"))
+                new_raw = strip_bridge_workspaces_pb(raw_summary)
+                ws_fts = workspace_display_names(real_uris)
+                strip_cids.add(cid)
+                strip_updates.append((new_ws_json, new_raw, ws_fts, cid))
+
+        has_fts = bool(
+            c.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='conversations_fts'"
+            ).fetchone()
+        )
+
+        if (remove_cids or strip_updates) and not args.dry_run and not args.no_backup:
+            create_rolling_backup(conn, db_path)
+
+        if not args.dry_run and (remove_cids or strip_updates):
+            if remove_cids:
+                cid_list = list(remove_cids)
+                for i in range(0, len(cid_list), 500):
+                    chunk = cid_list[i : i + 500]
+                    placeholders = ",".join(["?"] * len(chunk))
+                    c.execute(
+                        f"DELETE FROM conversation_summaries WHERE conversation_id IN ({placeholders})",
+                        chunk,
+                    )
+                    if has_fts:
+                        c.execute(
+                            f"DELETE FROM conversations_fts WHERE conversation_id IN ({placeholders})",
+                            chunk,
+                        )
+            for new_ws_json, new_raw, ws_fts, cid in strip_updates:
+                c.execute(
+                    "UPDATE conversation_summaries SET workspace_uris = ?, raw_summary = ? "
+                    "WHERE conversation_id = ?",
+                    (new_ws_json, new_raw, cid),
+                )
+                if has_fts and ws_fts:
+                    cur_fts_ws = c.execute(
+                        "SELECT workspace FROM conversations_fts "
+                        "WHERE conversation_id = ? AND chunk_index = -1",
+                        (cid,),
+                    ).fetchone()
+                    if cur_fts_ws and "magpie-agy-" in (cur_fts_ws[0] or ""):
+                        c.execute(
+                            "UPDATE conversations_fts SET workspace = ? "
+                            "WHERE conversation_id = ? AND chunk_index = -1",
+                            (ws_fts, cid),
+                        )
+            conn.commit()
+        conn.close()
+
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        backup_dir = os.path.join(base_dir, "backups", f"bridge-hidden-{ts}")
+        moved_files = (
+            move_session_files_to_backup(base_dir, backup_dir, remove_cids, dry_run=args.dry_run)
+            if remove_cids
+            else 0
+        )
+
+        proto_removed, proto_stripped = update_jetbox_proto(
+            proto_path,
+            remove_cids,
+            strip_cids,
+            dry_run=args.dry_run,
+            create_bak=not args.no_backup,
+        )
+        cache_changes = update_cache_json(
+            cache_dir,
+            remove_cids,
+            strip_cids,
+            dry_run=args.dry_run,
+            create_bak=not args.no_backup,
+        )
+
+        if args.verbose:
+            prefix = "[dry-run] " if args.dry_run else ""
+            print(
+                f"✓ {prefix}已隐藏/清理 {len(remove_cids)} 条纯临时或零步 bridge 会话（移动实体 {moved_files} 项），"
+                f"剥离 {len(strip_updates)} 条真实项目会话的临时路径，"
+                f"同步 proto(-{proto_removed}/~{proto_stripped}) 与 cache({cache_changes})"
+            )
+        return 0
+    except Exception as e:
+        if args.verbose:
+            print(f"Error: {e}", file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())
